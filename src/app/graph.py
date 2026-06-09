@@ -235,35 +235,29 @@ def supervisor_node(state: ShoppingState, llm: BaseChatModel) -> ShoppingState:
     """Gọi LLM để route câu hỏi."""
     question = state.get("question", "")
 
-    # Phát hiện order_id và customer_id từ câu hỏi
-    has_order_id = bool(re.search(r'(đơn\s*hàng|order|đơn)\s*(\d+)', question, re.IGNORECASE))
-    has_customer_id = bool(re.search(r'(khách\s*hàng|customer)\s*([A-Z]\d+)', question, re.IGNORECASE))
+    prompt = SUPERVISOR_PROMPT.format(question=question)
+    messages = [HumanMessage(content=prompt)]
 
-    # Phát hiện các từ khóa về policy
-    policy_keywords = ['chính sách', 'policy', 'hoàn trả', 'giao hàng', 'thanh toán', 'voucher', 'điều kiện']
-    has_policy_keyword = any(keyword in question.lower() for keyword in policy_keywords)
-
-    # Phát hiện từ khóa cần clarification
-    needs_clarification_keywords = ['của tôi', 'của mình', 'my']
-    needs_clarification = any(keyword in question.lower() for keyword in needs_clarification_keywords) and not (has_order_id or has_customer_id)
-
-    # Quyết định routing
-    if needs_clarification:
-        route = {
-            "status": "clarification_needed",
-            "needs_policy": False,
-            "needs_data": False,
-            "clarification_question": "Bạn vui lòng cung cấp mã đơn hàng hoặc mã khách hàng để tôi tra cứu thông tin chính xác.",
-        }
-    elif has_order_id or has_customer_id:
-        if has_policy_keyword or any(word in question.lower() for word in ['có được', 'được không', 'được hoàn', 'có thể']):
-            route = {"status": "ok", "needs_policy": True, "needs_data": True, "clarification_question": None}
-        else:
-            route = {"status": "ok", "needs_policy": False, "needs_data": True, "clarification_question": None}
-    elif has_policy_keyword or not (has_order_id or has_customer_id):
-        route = {"status": "ok", "needs_policy": True, "needs_data": False, "clarification_question": None}
-    else:
-        route = {"status": "ok", "needs_policy": True, "needs_data": False, "clarification_question": None}
+    # Try structured output if supported
+    try:
+        structured_llm = llm.with_structured_output(SupervisorRoute)
+        response = structured_llm.invoke(messages)
+        route = response.model_dump()
+    except Exception:
+        # Fallback to JSON parsing
+        response = llm.invoke(messages)
+        content = response.content
+        
+        try:
+            if "```json" in content:
+                json_str = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                json_str = content.split("```")[1].split("```")[0].strip()
+            else:
+                json_str = content.strip()
+            route = json.loads(json_str)
+        except Exception:
+            route = {"status": "ok", "needs_policy": True, "needs_data": False, "clarification_question": None}
 
     state["route"] = route
     state["trace"] = state.get("trace", []) + [{"node": "supervisor", "output": route}]
